@@ -1,150 +1,305 @@
-name: Detect Platform Configuration
+name: Full Hardware & System Report
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
-  workflow_dispatch:  # 支持手动触发
 
 jobs:
-  detect-config:
+  hardware-report:
     strategy:
-      fail-fast: false  # 某个平台失败不影响其他平台继续跑
+      fail-fast: false
       matrix:
-        os: 
+        os:
           - ubuntu-22.04
           - ubuntu-24.04
           - windows-2022
-          - macos-13      # Intel 芯片
-          - macos-14      # Apple Silicon (M1)
+          - macos-13
+          - macos-14
           - ubuntu-latest
           - windows-latest
           - macos-latest
     runs-on: ${{ matrix.os }}
-    
+
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ========== Linux 配置检测 ==========
-      - name: Detect Linux Configuration
+      # ==================== Linux 全量硬件信息 ====================
+      - name: Linux - Full Hardware Info
         if: runner.os == 'Linux'
         run: |
-          echo "===== 系统信息 ====="
+          echo "========== 1. 系统概览 =========="
           uname -a
           cat /etc/os-release
+          hostnamectl 2>/dev/null || true
           echo ""
-          
-          echo "===== CPU 信息 ====="
-          lscpu | grep -E "^(Architecture|CPU\(s\)|Model name|Thread|Core|Socket|CPU MHz)"
-          echo ""
-          
-          echo "===== 内存信息 ====="
-          free -h
-          echo ""
-          
-          echo "===== 磁盘信息 ====="
-          df -h /
-          echo ""
-          
-          echo "===== GPU 信息 ====="
-          if command -v nvidia-smi &> /dev/null; then
-            nvidia-smi
-          else
-            echo "无 NVIDIA GPU（GitHub 托管 Runner 默认无 GPU）"
-          fi
-          echo ""
-          
-          echo "===== 已安装工具 ====="
-          echo "Python: $(python3 --version 2>/dev/null || echo '未安装')"
-          echo "Node.js: $(node --version 2>/dev/null || echo '未安装')"
-          echo "Docker: $(docker --version 2>/dev/null || echo '未安装')"
-          echo "Git: $(git --version)"
-          echo "CMake: $(cmake --version 2>/dev/null | head -1 || echo '未安装')"
-          echo "GCC: $(gcc --version 2>/dev/null | head -1 || echo '未安装')"
 
-      # ========== Windows 配置检测 ==========
-      - name: Detect Windows Configuration
+          echo "========== 2. CPU 详细信息 =========="
+          lscpu
+          echo "--- CPU 拓扑 ---"
+          lscpu -e 2>/dev/null || true
+          echo "--- CPU 频率 ---"
+          cat /proc/cpuinfo | grep -E "model name|cpu MHz|cache size|siblings|cpu cores" | head -20
+          echo ""
+
+          echo "========== 3. 内存详细信息 =========="
+          free -h
+          echo "--- /proc/meminfo ---"
+          cat /proc/meminfo | head -30
+          echo "--- NUMA ---"
+          numactl --hardware 2>/dev/null || echo "numactl 不可用"
+          echo "--- Swap ---"
+          swapon --show 2>/dev/null || cat /proc/swaps
+          echo ""
+
+          echo "========== 4. 磁盘与存储 =========="
+          echo "--- 块设备 ---"
+          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL,ROTA,TRAN 2>/dev/null || lsblk
+          echo "--- 文件系统 ---"
+          df -hT
+          echo "--- 磁盘详情 ---"
+          sudo fdisk -l 2>/dev/null || fdisk -l 2>/dev/null || true
+          echo "--- 磁盘IO性能(简单测试) ---"
+          dd if=/dev/zero of=/tmp/testfile bs=1M count=256 conv=fdatasync 2>&1 | tail -1
+          rm -f /tmp/testfile
+          echo ""
+
+          echo "========== 5. GPU / 显示设备 =========="
+          if command -v nvidia-smi &>/dev/null; then
+            nvidia-smi
+            nvidia-smi -q | head -60
+          else
+            echo "无 NVIDIA GPU"
+          fi
+          lspci | grep -iE "vga|3d|display" 2>/dev/null || echo "lspci 不可用"
+          echo ""
+
+          echo "========== 6. PCI 设备列表 =========="
+          lspci 2>/dev/null | head -30 || echo "lspci 不可用"
+          echo ""
+
+          echo "========== 7. USB 设备 =========="
+          lsusb 2>/dev/null || echo "lsusb 不可用"
+          echo ""
+
+          echo "========== 8. 网络接口 =========="
+          ip addr show
+          ip route show
+          echo "--- 网卡详情 ---"
+          for iface in $(ls /sys/class/net/ 2>/dev/null); do
+            echo "接口: $iface"
+            cat /sys/class/net/$iface/speed 2>/dev/null && echo " Mbps" || true
+            cat /sys/class/net/$iface/mtu 2>/dev/null && echo " MTU" || true
+          done
+          echo ""
+
+          echo "========== 9. 虚拟化 / 云平台检测 =========="
+          systemd-detect-virt 2>/dev/null || true
+          cat /sys/hypervisor/type 2>/dev/null || true
+          dmidecode -s system-product-name 2>/dev/null || echo "dmidecode 需 root"
+          dmidecode -s system-manufacturer 2>/dev/null || true
+          echo ""
+
+          echo "========== 10. 内核参数 =========="
+          sysctl -a 2>/dev/null | grep -E "^(kernel\.ostype|kernel\.hostname|vm\.swappiness|net\.core\.somaxconn)" || true
+          echo ""
+
+          echo "========== 11. 已安装开发工具版本 =========="
+          for cmd in python3 python node npm pip3 docker git cmake gcc g++ make java dotnet go rustc cargo; do
+            if command -v $cmd &>/dev/null; then
+              echo "$cmd: $($cmd --version 2>&1 | head -1)"
+            fi
+          done
+          echo ""
+
+          echo "========== 12. 环境变量(关键) =========="
+          env | grep -iE "^(PATH|HOME|USER|RUNNER|GITHUB|JAVA_HOME|DOTNET|CONDA)" | sort
+        shell: bash
+
+      # ==================== Windows 全量硬件信息 ====================
+      - name: Windows - Full Hardware Info
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Write-Host "===== 系统信息 ====="
+          Write-Host "========== 1. 系统概览 =========="
+          Get-ComputerInfo | Select-Object OsName, OsVersion, OsArchitecture, WindowsVersion, TotalPhysicalMemory, CsProcessors, CsNumberOfProcessors
           [System.Environment]::OSVersion
-          systeminfo | Select-String "OS Name|OS Version|System Type"
           Write-Host ""
-          
-          Write-Host "===== CPU 信息 ====="
-          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
+
+          Write-Host "========== 2. CPU 详细信息 =========="
+          Get-CimInstance Win32_Processor | Format-List Name, Manufacturer, MaxClockSpeed, CurrentClockSpeed, NumberOfCores, NumberOfLogicalProcessors, L2CacheSize, L3CacheSize, Architecture, AddressWidth, VirtualizationFirmwareEnabled
+          Write-Host "--- CPU 利用率 ---"
+          Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3
           Write-Host ""
-          
-          Write-Host "===== 内存信息 ====="
+
+          Write-Host "========== 3. 内存详细信息 =========="
           $os = Get-CimInstance Win32_OperatingSystem
           $totalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
           $freeGB = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
-          Write-Host "总内存: ${totalGB} GB, 可用: ${freeGB} GB"
+          $usedGB = [math]::Round($totalGB - $freeGB, 2)
+          Write-Host "总内存: ${totalGB} GB | 已用: ${usedGB} GB | 可用: ${freeGB} GB"
+          Write-Host "--- 内存插槽 ---"
+          Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity, Speed, Manufacturer, PartNumber, DeviceLocator | Format-Table
+          Write-Host "--- 虚拟内存 ---"
+          Get-CimInstance Win32_PageFileUsage | Select-Object Name, AllocatedBaseSize, CurrentUsage, PeakUsage | Format-Table
           Write-Host ""
-          
-          Write-Host "===== 磁盘信息 ====="
-          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
+
+          Write-Host "========== 4. 磁盘与存储 =========="
+          Write-Host "--- 物理磁盘 ---"
+          Get-CimInstance Win32_DiskDrive | Select-Object Model, Size, InterfaceType, MediaType, TotalCylinders, TotalHeads, TotalSectors, BytesPerSector | Format-List
+          Write-Host "--- 逻辑分区 ---"
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}, @{N='Total(GB)';E={[math]::Round(($_.Used+$_.Free)/1GB,2)}} | Format-Table
+          Write-Host "--- 卷信息 ---"
+          Get-Volume | Select-Object DriveLetter, FileSystemLabel, FileSystem, HealthStatus, @{N='Size(GB)';E={[math]::Round($_.Size/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.SizeRemaining/1GB,2)}} | Format-Table
+          Write-Host "--- 磁盘IO测试 ---"
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $buf = New-Object byte[] 1MB
+          $fs = [System.IO.File]::Create("C:\Windows\Temp\iotest.tmp", 1MB, 'WriteThrough')
+          for ($i = 0; $i -lt 256; $i++) { $fs.Write($buf, 0, 1MB) }
+          $fs.Flush($true); $fs.Close()
+          $sw.Stop()
+          Write-Host "写入 256MB 耗时: $($sw.ElapsedMilliseconds)ms"
+          Remove-Item "C:\Windows\Temp\iotest.tmp" -Force
           Write-Host ""
-          
-          Write-Host "===== 已安装工具 ====="
-          $tools = @("python", "node", "docker", "git", "cmake", "choco")
+
+          Write-Host "========== 5. GPU / 显示设备 =========="
+          Get-CimInstance Win32_VideoController | Format-List Name, AdapterRAM, DriverVersion, DriverDate, CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate, VideoProcessor
+          if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+            nvidia-smi
+          } else {
+            Write-Host "无 NVIDIA GPU / nvidia-smi 不可用"
+          }
+          Write-Host ""
+
+          Write-Host "========== 6. 网络设备 =========="
+          Get-NetAdapter | Select-Object Name, InterfaceDescription, MacAddress, LinkSpeed, Status, PhysicalMediaType | Format-Table
+          Get-NetIPAddress -AddressFamily IPv4 | Select-Object InterfaceAlias, IPAddress, PrefixLength | Format-Table
+          Get-NetRoute -AddressFamily IPv4 | Select-Object DestinationPrefix, NextHop, InterfaceAlias | Format-Table
+          Write-Host ""
+
+          Write-Host "========== 7. 虚拟化 / 云平台检测 =========="
+          Get-CimInstance Win32_ComputerSystem | Select-Object Model, Manufacturer, HypervisorPresent, TotalPhysicalMemory
+          Get-CimInstance Win32_BIOS | Select-Object Manufacturer, SMBIOSBIOSVersion, ReleaseDate
+          Write-Host ""
+
+          Write-Host "========== 8. 已安装开发工具版本 =========="
+          $tools = @("python", "python3", "node", "npm", "pip", "docker", "git", "cmake", "gcc", "java", "dotnet", "go", "rustc", "cargo", "choco", "winget")
           foreach ($tool in $tools) {
             $cmd = Get-Command $tool -ErrorAction SilentlyContinue
             if ($cmd) {
-              Write-Host "${tool}: $(& $tool --version 2>&1 | Select-Object -First 1)"
-            } else {
-              Write-Host "${tool}: 未安装"
+              $ver = & $tool --version 2>&1 | Select-Object -First 1
+              Write-Host "${tool}: $ver"
             }
           }
+          Write-Host ""
 
-      # ========== macOS 配置检测 ==========
-      - name: Detect macOS Configuration
+          Write-Host "========== 9. 环境变量(关键) =========="
+          Get-ChildItem Env: | Where-Object { $_.Name -match "^(PATH|HOME|USERPROFILE|RUNNER|GITHUB|JAVA_HOME|DOTNET|ProgramFiles)" } | Sort-Object Name | Format-Table -AutoSize
+
+      # ==================== macOS 全量硬件信息 ====================
+      - name: macOS - Full Hardware Info
         if: runner.os == 'macOS'
         run: |
-          echo "===== 系统信息 ====="
+          echo "========== 1. 系统概览 =========="
           sw_vers
           uname -a
-          echo ""
-          
-          echo "===== CPU 信息 ====="
-          sysctl -n machdep.cpu.brand_string
-          echo "核心数: $(sysctl -n hw.ncpu)"
+          echo "内核: $(uname -r)"
           echo "架构: $(uname -m)"
           echo ""
-          
-          echo "===== 内存信息 ====="
-          sysctl -n hw.memsize | awk '{printf "总内存: %.2f GB\n", $1/1024/1024/1024}'
-          vm_stat | head -5
-          echo ""
-          
-          echo "===== 磁盘信息 ====="
-          df -h /
-          echo ""
-          
-          echo "===== GPU 信息 ====="
-          system_profiler SPDisplaysDataType 2>/dev/null | grep -E "Chipset|VRAM|Metal" || echo "无法获取 GPU 详情"
-          echo ""
-          
-          echo "===== 已安装工具 ====="
-          echo "Python: $(python3 --version 2>/dev/null || echo '未安装')"
-          echo "Node.js: $(node --version 2>/dev/null || echo '未安装')"
-          echo "Docker: $(docker --version 2>/dev/null || echo '未安装')"
-          echo "Git: $(git --version)"
-          echo "Xcode: $(xcodebuild -version 2>/dev/null | head -1 || echo '未安装')"
-          echo "Homebrew: $(brew --version 2>/dev/null | head -1 || echo '未安装')"
 
-      # ========== 汇总输出到 Step Summary ==========
-      - name: Write Summary
+          echo "========== 2. CPU 详细信息 =========="
+          echo "型号: $(sysctl -n machdep.cpu.brand_string)"
+          echo "核心数: $(sysctl -n hw.ncpu)"
+          echo "物理核心: $(sysctl -n hw.physicalcpu)"
+          echo "逻辑核心: $(sysctl -n hw.logicalcpu)"
+          echo "L1缓存: $(sysctl -n hw.l1icachesize 2>/dev/null) bytes (指令)"
+          echo "L2缓存: $(sysctl -n hw.l2cachesize 2>/dev/null) bytes"
+          echo "L3缓存: $(sysctl -n hw.l3cachesize 2>/dev/null) bytes"
+          echo "CPU频率: $(sysctl -n hw.cpufrequency 2>/dev/null) Hz"
+          echo "总线频率: $(sysctl -n hw.busfrequency 2>/dev/null) Hz"
+          echo "CPU特性:"
+          sysctl -a 2>/dev/null | grep machdep.cpu.features | head -3
+          echo "--- CPU拓扑 ---"
+          system_profiler SPHardwareDataType 2>/dev/null
+          echo ""
+
+          echo "========== 3. 内存详细信息 =========="
+          $memBytes=$(sysctl -n hw.memsize)
+          echo "总内存: $(echo "scale=2; $memBytes/1024/1024/1024" | bc) GB"
+          echo "--- vm_stat ---"
+          vm_stat
+          echo "--- 内存压力 ---"
+          memory_pressure 2>/dev/null | head -10 || true
+          echo "--- Swap ---"
+          sysctl vm.swapusage
+          echo ""
+
+          echo "========== 4. 磁盘与存储 =========="
+          echo "--- 磁盘列表 ---"
+          diskutil list
+          echo "--- 文件系统 ---"
+          df -h
+          echo "--- 磁盘详情 ---"
+          diskutil info / 2>/dev/null | grep -E "Volume Name|File System|Total Size|Free Space|Device Media|Solid State"
+          echo "--- 磁盘IO测试 ---"
+          dd if=/dev/zero of=/tmp/iotest bs=1m count=256 2>&1 | tail -1
+          rm -f /tmp/iotest
+          echo ""
+
+          echo "========== 5. GPU / 显示设备 =========="
+          system_profiler SPDisplaysDataType 2>/dev/null
+          echo ""
+
+          echo "========== 6. USB 设备 =========="
+          system_profiler SPUSBDataType 2>/dev/null | head -40 || echo "无USB设备信息"
+          echo ""
+
+          echo "========== 7. 网络接口 =========="
+          ifconfig -a
+          echo "--- 路由表 ---"
+          netstat -rn | head -20
+          echo "--- 网络服务 ---"
+          networksetup -listallnetworkservices 2>/dev/null || true
+          echo ""
+
+          echo "========== 8. 电源与电池 =========="
+          pmset -g batt 2>/dev/null || true
+          echo ""
+
+          echo "========== 9. 已安装开发工具版本 =========="
+          for cmd in python3 python node npm pip3 docker git cmake gcc clang make java dotnet go rustc cargo brew pod xcodebuild swift; do
+            if command -v $cmd &>/dev/null; then
+              echo "$cmd: $($cmd --version 2>&1 | head -1)"
+            fi
+          done
+          echo "--- Xcode ---"
+          xcode-select -p 2>/dev/null
+          xcodebuild -version 2>/dev/null | head -2
+          echo "--- SDK ---"
+          xcrun --show-sdk-version 2>/dev/null
+          echo ""
+
+          echo "========== 10. 环境变量(关键) =========="
+          env | grep -iE "^(PATH|HOME|USER|RUNNER|GITHUB|JAVA_HOME|DEVELOPER|ANDROID)" | sort
+        shell: bash
+
+      # ==================== 汇总到 Summary ====================
+      - name: Write Summary Report
         run: |
-          echo "## 平台配置检测报告" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| 项目 | 值 |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| Runner OS | ${{ runner.os }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Runner 环境 | ${{ matrix.os }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 架构 | $(uname -m 2>/dev/null || echo 'N/A') |" >> $GITHUB_STEP_SUMMARY
-          echo "| 主机名 | $(hostname) |" >> $GITHUB_STEP_SUMMARY
-          echo "| 工作目录 | $(pwd) |" >> $GITHUB_STEP_SUMMARY
-          echo "| 用户 | $(whoami) |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🖥️ ${{ matrix.os }} 硬件配置报告"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|------|-----|"
+            echo "| Runner OS | ${{ runner.os }} |"
+            echo "| 环境标签 | ${{ matrix.os }} |"
+            echo "| 架构 | $(uname -m 2>/dev/null || echo 'N/A') |"
+            echo "| 主机名 | $(hostname) |"
+            echo "| 用户 | $(whoami) |"
+            echo "| 工作目录 | $(pwd) |"
+            echo "| 运行时间 | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |"
+            echo ""
+            echo "> 完整硬件详情请查看各 Step 日志输出"
+          } >> $GITHUB_STEP_SUMMARY
         shell: bash
