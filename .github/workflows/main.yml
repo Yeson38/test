@@ -1,0 +1,150 @@
+name: Detect Platform Configuration
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  detect-config:
+    strategy:
+      fail-fast: false  # 某个平台失败不影响其他平台继续跑
+      matrix:
+        os: 
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - windows-2022
+          - macos-13      # Intel 芯片
+          - macos-14      # Apple Silicon (M1)
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ========== Linux 配置检测 ==========
+      - name: Detect Linux Configuration
+        if: runner.os == 'Linux'
+        run: |
+          echo "===== 系统信息 ====="
+          uname -a
+          cat /etc/os-release
+          echo ""
+          
+          echo "===== CPU 信息 ====="
+          lscpu | grep -E "^(Architecture|CPU\(s\)|Model name|Thread|Core|Socket|CPU MHz)"
+          echo ""
+          
+          echo "===== 内存信息 ====="
+          free -h
+          echo ""
+          
+          echo "===== 磁盘信息 ====="
+          df -h /
+          echo ""
+          
+          echo "===== GPU 信息 ====="
+          if command -v nvidia-smi &> /dev/null; then
+            nvidia-smi
+          else
+            echo "无 NVIDIA GPU（GitHub 托管 Runner 默认无 GPU）"
+          fi
+          echo ""
+          
+          echo "===== 已安装工具 ====="
+          echo "Python: $(python3 --version 2>/dev/null || echo '未安装')"
+          echo "Node.js: $(node --version 2>/dev/null || echo '未安装')"
+          echo "Docker: $(docker --version 2>/dev/null || echo '未安装')"
+          echo "Git: $(git --version)"
+          echo "CMake: $(cmake --version 2>/dev/null | head -1 || echo '未安装')"
+          echo "GCC: $(gcc --version 2>/dev/null | head -1 || echo '未安装')"
+
+      # ========== Windows 配置检测 ==========
+      - name: Detect Windows Configuration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "===== 系统信息 ====="
+          [System.Environment]::OSVersion
+          systeminfo | Select-String "OS Name|OS Version|System Type"
+          Write-Host ""
+          
+          Write-Host "===== CPU 信息 ====="
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
+          Write-Host ""
+          
+          Write-Host "===== 内存信息 ====="
+          $os = Get-CimInstance Win32_OperatingSystem
+          $totalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+          $freeGB = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+          Write-Host "总内存: ${totalGB} GB, 可用: ${freeGB} GB"
+          Write-Host ""
+          
+          Write-Host "===== 磁盘信息 ====="
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
+          Write-Host ""
+          
+          Write-Host "===== 已安装工具 ====="
+          $tools = @("python", "node", "docker", "git", "cmake", "choco")
+          foreach ($tool in $tools) {
+            $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+            if ($cmd) {
+              Write-Host "${tool}: $(& $tool --version 2>&1 | Select-Object -First 1)"
+            } else {
+              Write-Host "${tool}: 未安装"
+            }
+          }
+
+      # ========== macOS 配置检测 ==========
+      - name: Detect macOS Configuration
+        if: runner.os == 'macOS'
+        run: |
+          echo "===== 系统信息 ====="
+          sw_vers
+          uname -a
+          echo ""
+          
+          echo "===== CPU 信息 ====="
+          sysctl -n machdep.cpu.brand_string
+          echo "核心数: $(sysctl -n hw.ncpu)"
+          echo "架构: $(uname -m)"
+          echo ""
+          
+          echo "===== 内存信息 ====="
+          sysctl -n hw.memsize | awk '{printf "总内存: %.2f GB\n", $1/1024/1024/1024}'
+          vm_stat | head -5
+          echo ""
+          
+          echo "===== 磁盘信息 ====="
+          df -h /
+          echo ""
+          
+          echo "===== GPU 信息 ====="
+          system_profiler SPDisplaysDataType 2>/dev/null | grep -E "Chipset|VRAM|Metal" || echo "无法获取 GPU 详情"
+          echo ""
+          
+          echo "===== 已安装工具 ====="
+          echo "Python: $(python3 --version 2>/dev/null || echo '未安装')"
+          echo "Node.js: $(node --version 2>/dev/null || echo '未安装')"
+          echo "Docker: $(docker --version 2>/dev/null || echo '未安装')"
+          echo "Git: $(git --version)"
+          echo "Xcode: $(xcodebuild -version 2>/dev/null | head -1 || echo '未安装')"
+          echo "Homebrew: $(brew --version 2>/dev/null | head -1 || echo '未安装')"
+
+      # ========== 汇总输出到 Step Summary ==========
+      - name: Write Summary
+        run: |
+          echo "## 平台配置检测报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner OS | ${{ runner.os }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner 环境 | ${{ matrix.os }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 架构 | $(uname -m 2>/dev/null || echo 'N/A') |" >> $GITHUB_STEP_SUMMARY
+          echo "| 主机名 | $(hostname) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 工作目录 | $(pwd) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 用户 | $(whoami) |" >> $GITHUB_STEP_SUMMARY
+        shell: bash
